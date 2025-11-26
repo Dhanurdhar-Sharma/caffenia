@@ -3,15 +3,15 @@ import json
 import firebase_admin
 from firebase_admin import credentials, firestore
 
-# Load from Render environment variable if present
+# Load service account credentials from environment variable
 firebase_json = os.getenv("FIREBASE_CRED_JSON")
 
-if firebase_json:
-    cred_dict = json.loads(firebase_json)
-    cred = credentials.Certificate(cred_dict)
-else:
-    # Local fallback (for testing)
-    cred = credentials.Certificate("serviceAccountKey.json")
+if not firebase_json:
+    raise Exception("❌ FIREBASE_CRED_JSON environment variable not set!")
 
+cred_dict = json.loads(firebase_json)
+cred = credentials.Certificate(cred_dict)
 firebase_admin.initialize_app(cred)
 db = firestore.client()
+
+print("✅ Connected to Firestore:", db)
