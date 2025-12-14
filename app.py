@@ -55,24 +55,37 @@ except Exception as e:
 face_app = None
 
 def get_face_app():
-    """Load and cache lightweight InsightFace model (buffalo_l)."""
+    """Load and cache lightweight InsightFace model."""
     global face_app
     if face_app is not None:
         return face_app
 
     try:
-        logging.info("⚙️ Loading lightweight InsightFace model (buffalo_l)...")
         model_dir = "/opt/render/project/.models" if os.getenv("RENDER") else "models"
         os.makedirs(model_dir, exist_ok=True)
 
-        face_app = FaceAnalysis(
-            name="buffalo_l",
-            root=model_dir,
-            allowed_modules=["detection", "recognition"],
-            providers=["CPUExecutionProvider"]
-        )
-        face_app.prepare(ctx_id=0)
-        logging.info("✅ InsightFace (buffalo_l) loaded successfully!")
+        # 💡 Try antelopev2 (lighter); fallback to buffalo_l if needed
+        try:
+            logging.info("⚙️ Loading InsightFace model: antelopev2")
+            face_app = FaceAnalysis(
+                name="antelopev2",
+                root=model_dir,
+                allowed_modules=["detection", "recognition"],
+                providers=["CPUExecutionProvider"]
+            )
+            face_app.prepare(ctx_id=0)
+            logging.info("✅ InsightFace (antelopev2) loaded successfully!")
+        except Exception as err:
+            logging.warning(f"⚠️ antelopev2 failed ({err}), using buffalo_l instead")
+            face_app = FaceAnalysis(
+                name="buffalo_l",
+                root=model_dir,
+                allowed_modules=["detection", "recognition"],
+                providers=["CPUExecutionProvider"]
+            )
+            face_app.prepare(ctx_id=0)
+            logging.info("✅ InsightFace (buffalo_l) loaded successfully!")
+
     except Exception as e:
         logging.error(f"❌ Failed to load InsightFace model: {e}")
         traceback.print_exc()
@@ -148,7 +161,7 @@ def register_face():
         db.collection("faces").document(email).set({"embedding": emb_list})
         logging.info(f"✅ Face registered for {email}")
 
-        os.remove(img_path)  # cleanup
+        os.remove(img_path)
 
         return jsonify({
             "status": "success",
@@ -174,8 +187,8 @@ def verify():
         if not email or not latitude or not longitude:
             return jsonify({"status": "error", "message": "Email and location required"}), 400
 
-        # 🌍 Office location setup
-        OFFICE_LAT, OFFICE_LON = 26.92362149151839, 75.80682636101716  # Example: Jaipur
+        # 🌍 Office coordinates
+        OFFICE_LAT, OFFICE_LON = 26.92362149151839, 75.80682636101716  # Jaipur office example
         MAX_DISTANCE_KM = 0.02  # 20 meters
 
         user_location = (float(latitude), float(longitude))
@@ -189,7 +202,7 @@ def verify():
                 "distance_km": round(distance_km, 2)
             }), 403
 
-        # ✅ Proceed with face verification
+        # ✅ Face verification
         img_file = request.files["image"]
         filename = secure_filename(img_file.filename)
         os.makedirs("temp", exist_ok=True)
@@ -244,6 +257,17 @@ def verify():
         logging.error("Error in /verify")
         traceback.print_exc()
         return jsonify({"status": "error", "message": str(e)}), 500
+
+
+# ---------------------------------------------------------
+# 🌐 ROOT ROUTE
+# ---------------------------------------------------------
+@app.route("/", methods=["GET"])
+def index():
+    return jsonify({
+        "message": "☕ Caffeina Staff API is live!",
+        "endpoints": ["/register_face", "/verify", "/health"]
+    })
 
 
 # ---------------------------------------------------------
