@@ -10,6 +10,7 @@ import logging
 import traceback
 from datetime import datetime
 from werkzeug.utils import secure_filename
+from geopy.distance import geodesic
 
 # ---------------------------------------------------------
 # ✅ CONFIGURATION
@@ -22,10 +23,9 @@ logging.basicConfig(
 )
 
 # ---------------------------------------------------------
-# 🔥 FIREBASE INITIALIZATION (Works both Locally & on Render)
+# 🔥 FIREBASE INITIALIZATION (Local + Render)
 # ---------------------------------------------------------
 try:
-    # Try environment variable (Render)
     firebase_json = os.getenv("FIREBASE_CRED_JSON")
 
     if firebase_json:
@@ -55,7 +55,7 @@ except Exception as e:
 face_app = None
 
 def get_face_app():
-    """Load and cache the lightweight InsightFace model (buffalo_l)."""
+    """Load and cache lightweight InsightFace model (buffalo_l)."""
     global face_app
     if face_app is not None:
         return face_app
@@ -148,8 +148,7 @@ def register_face():
         db.collection("faces").document(email).set({"embedding": emb_list})
         logging.info(f"✅ Face registered for {email}")
 
-        # Clean up to save disk space
-        os.remove(img_path)
+        os.remove(img_path)  # cleanup
 
         return jsonify({
             "status": "success",
@@ -163,7 +162,7 @@ def register_face():
 
 
 # ---------------------------------------------------------
-# 📸 VERIFY FACE & MARK ATTENDANCE
+# 📸 VERIFY FACE & MARK ATTENDANCE (with Location Check)
 # ---------------------------------------------------------
 @app.route("/verify", methods=["POST"])
 def verify():
@@ -172,12 +171,25 @@ def verify():
         latitude = request.form.get("latitude")
         longitude = request.form.get("longitude")
 
-        if not email:
-            return jsonify({"status": "error", "message": "Email required"}), 400
+        if not email or not latitude or not longitude:
+            return jsonify({"status": "error", "message": "Email and location required"}), 400
 
-        if "image" not in request.files:
-            return jsonify({"status": "error", "message": "No image provided"}), 400
+        # 🌍 Office location setup
+        OFFICE_LAT, OFFICE_LON = 26.92362149151839, 75.80682636101716  # Example: Jaipur
+        MAX_DISTANCE_KM = 0.02  # 20 meters
 
+        user_location = (float(latitude), float(longitude))
+        office_location = (OFFICE_LAT, OFFICE_LON)
+        distance_km = geodesic(user_location, office_location).km
+
+        if distance_km > MAX_DISTANCE_KM:
+            return jsonify({
+                "status": "error",
+                "message": f"You are outside office range ({distance_km:.2f} km)",
+                "distance_km": round(distance_km, 2)
+            }), 403
+
+        # ✅ Proceed with face verification
         img_file = request.files["image"]
         filename = secure_filename(img_file.filename)
         os.makedirs("temp", exist_ok=True)
@@ -193,13 +205,14 @@ def verify():
         stored_emb = np.array(doc.to_dict()["embedding"])
         similarity = np.dot(emb, stored_emb) / (np.linalg.norm(emb) * np.linalg.norm(stored_emb))
 
-        threshold = 0.55  # tuned for buffalo_l
+        threshold = 0.55
         if similarity < threshold:
             logging.warning(f"❌ Face mismatch for {email} ({similarity:.2f})")
             return jsonify({
                 "status": "error",
                 "message": f"Face mismatch ({similarity:.2f})",
-                "similarity": float(similarity)
+                "similarity": float(similarity),
+                "distance_km": round(distance_km, 2)
             }), 401
 
         today = datetime.now().strftime("%Y-%m-%d")
@@ -211,6 +224,7 @@ def verify():
             "status": "Present",
             "time": time_now,
             "location": {"lat": latitude, "lon": longitude},
+            "distance_km": round(distance_km, 2),
             "similarity": float(similarity)
         }
         attendance_ref.set(data)
@@ -221,7 +235,9 @@ def verify():
         return jsonify({
             "status": "success",
             "message": f"Attendance marked successfully ({similarity:.2f})",
-            "similarity": float(similarity)
+            "similarity": float(similarity),
+            "distance_km": round(distance_km, 2),
+            "time": time_now
         }), 200
 
     except Exception as e:
