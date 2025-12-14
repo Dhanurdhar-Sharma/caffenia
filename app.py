@@ -1,9 +1,11 @@
 import os
 import cv2
+import json
 import numpy as np
 from flask import Flask, request, jsonify
 from insightface.app import FaceAnalysis
 from firebase_admin import credentials, firestore, initialize_app
+import firebase_admin
 import logging
 import traceback
 from datetime import datetime
@@ -19,36 +21,58 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
 
-# Firebase Setup
-cred = credentials.Certificate("firebase_config.json")
-initialize_app(cred)
-db = firestore.client()
-logging.info("✅ Connected to Firestore")
+# ---------------------------------------------------------
+# 🔥 FIREBASE INITIALIZATION (Works both Locally & on Render)
+# ---------------------------------------------------------
+try:
+    # Try environment variable (Render)
+    firebase_json = os.getenv("FIREBASE_CRED_JSON")
+
+    if firebase_json:
+        logging.info("🌍 Using Firebase credentials from environment variable")
+        cred_info = json.loads(firebase_json)
+    else:
+        logging.info("💻 Using local firebase_config.json file")
+        with open("firebase_config.json") as f:
+            cred_info = json.load(f)
+
+    cred = credentials.Certificate(cred_info)
+    if not firebase_admin._apps:
+        initialize_app(cred)
+
+    db = firestore.client()
+    logging.info("✅ Connected to Firestore successfully!")
+
+except Exception as e:
+    logging.error(f"❌ Failed to initialize Firebase: {e}")
+    traceback.print_exc()
+    raise e
+
 
 # ---------------------------------------------------------
-# 🧠 FACE MODEL LOADING (Stable for Render)
+# 🧠 LIGHTWEIGHT FACE MODEL (for Render/Low Storage)
 # ---------------------------------------------------------
 face_app = None
 
 def get_face_app():
-    """Safely load and cache InsightFace for CPU."""
+    """Load and cache the lightweight InsightFace model (buffalo_l)."""
     global face_app
     if face_app is not None:
         return face_app
 
     try:
-        logging.info("⚙️ Loading InsightFace (antelopev2, CPU)...")
-        model_dir = "/opt/render/project/.models"
+        logging.info("⚙️ Loading lightweight InsightFace model (buffalo_l)...")
+        model_dir = "/opt/render/project/.models" if os.getenv("RENDER") else "models"
         os.makedirs(model_dir, exist_ok=True)
 
         face_app = FaceAnalysis(
-            name="antelopev2",
+            name="buffalo_l",
             root=model_dir,
-            allowed_modules=['detection', 'recognition'],
+            allowed_modules=["detection", "recognition"],
             providers=["CPUExecutionProvider"]
         )
         face_app.prepare(ctx_id=0)
-        logging.info("✅ InsightFace loaded successfully!")
+        logging.info("✅ InsightFace (buffalo_l) loaded successfully!")
     except Exception as e:
         logging.error(f"❌ Failed to load InsightFace model: {e}")
         traceback.print_exc()
@@ -64,8 +88,10 @@ def extract_embedding(img_path):
     try:
         app_model = get_face_app()
         img = cv2.imread(img_path)
-        faces = app_model.get(img)
+        if img is None:
+            raise ValueError("Invalid image path or format")
 
+        faces = app_model.get(img)
         if not faces:
             raise ValueError("No face detected")
 
@@ -119,11 +145,16 @@ def register_face():
         emb, _ = extract_embedding(img_path)
         emb_list = emb.tolist()
 
-        # Store embedding in Firestore
         db.collection("faces").document(email).set({"embedding": emb_list})
         logging.info(f"✅ Face registered for {email}")
 
-        return jsonify({"status": "success", "message": f"Face registered for {email}"}), 200
+        # Clean up to save disk space
+        os.remove(img_path)
+
+        return jsonify({
+            "status": "success",
+            "message": f"Face registered for {email}"
+        }), 200
 
     except Exception as e:
         logging.error("Error in /register_face")
@@ -155,7 +186,6 @@ def verify():
 
         emb, _ = extract_embedding(img_path)
 
-        # Retrieve stored embedding
         doc = db.collection("faces").document(email).get()
         if not doc.exists:
             return jsonify({"status": "error", "message": "No registered face found"}), 404
@@ -163,16 +193,15 @@ def verify():
         stored_emb = np.array(doc.to_dict()["embedding"])
         similarity = np.dot(emb, stored_emb) / (np.linalg.norm(emb) * np.linalg.norm(stored_emb))
 
-        # Threshold for similarity
-        threshold = 0.6
+        threshold = 0.55  # tuned for buffalo_l
         if similarity < threshold:
+            logging.warning(f"❌ Face mismatch for {email} ({similarity:.2f})")
             return jsonify({
                 "status": "error",
                 "message": f"Face mismatch ({similarity:.2f})",
                 "similarity": float(similarity)
             }), 401
 
-        # Mark attendance
         today = datetime.now().strftime("%Y-%m-%d")
         time_now = datetime.now().strftime("%H:%M:%S")
 
@@ -186,7 +215,9 @@ def verify():
         }
         attendance_ref.set(data)
 
+        os.remove(img_path)
         logging.info(f"✅ Attendance marked for {email} at {time_now}")
+
         return jsonify({
             "status": "success",
             "message": f"Attendance marked successfully ({similarity:.2f})",
@@ -204,5 +235,5 @@ def verify():
 # ---------------------------------------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5003))
-    logging.info(f"🚀 Starting server on port {port}")
+    logging.info(f"🚀 Starting Flask server on port {port}")
     app.run(host="0.0.0.0", port=port)
